@@ -1,4 +1,7 @@
+#!/usr/bin/env python3
 import logging
+import os
+import argparse
 from pathlib import Path
 from typing import Sequence
 from mcp.server import Server
@@ -14,6 +17,10 @@ from mcp.types import (
 from enum import Enum
 import git
 from pydantic import BaseModel
+
+# Get Git credentials from environment
+GIT_USERNAME = os.environ.get('GIT_USERNAME')
+GIT_TOKEN = os.environ.get('GIT_TOKEN')
 
 class GitStatus(BaseModel):
     repo_path: str
@@ -56,6 +63,56 @@ class GitShow(BaseModel):
     repo_path: str
     revision: str
 
+class GitPush(BaseModel):
+    repo_path: str
+    remote: str = "origin"
+    branch: str | None = None
+
+class GitPull(BaseModel):
+    repo_path: str
+    remote: str = "origin"
+    branch: str | None = None
+    rebase: bool = False
+
+class GitFetch(BaseModel):
+    repo_path: str
+    remote: str = "origin"
+
+class GitMerge(BaseModel):
+    repo_path: str
+    branch: str
+
+class GitStash(BaseModel):
+    repo_path: str
+    message: str | None = None
+
+class GitStashPop(BaseModel):
+    repo_path: str
+    index: int = 0
+
+class GitGetCurrentBranch(BaseModel):
+    repo_path: str
+
+class GitListBranches(BaseModel):
+    repo_path: str
+
+class GitDeleteBranch(BaseModel):
+    repo_path: str
+    branch_name: str
+    force: bool = False
+
+class GitListRemotes(BaseModel):
+    repo_path: str
+
+class GitAddRemote(BaseModel):
+    repo_path: str
+    name: str
+    url: str
+
+class GitRemoveRemote(BaseModel):
+    repo_path: str
+    name: str
+
 class GitTools(str, Enum):
     STATUS = "git_status"
     DIFF_UNSTAGED = "git_diff_unstaged"
@@ -68,18 +125,34 @@ class GitTools(str, Enum):
     CREATE_BRANCH = "git_create_branch"
     CHECKOUT = "git_checkout"
     SHOW = "git_show"
+    PUSH = "git_push"
+    PULL = "git_pull"
+    FETCH = "git_fetch"
+    MERGE = "git_merge"
+    STASH = "git_stash"
+    STASH_POP = "git_stash_pop"
+    GET_CURRENT_BRANCH = "git_get_current_branch"
+    LIST_BRANCHES = "git_list_branches"
+    DELETE_BRANCH = "git_delete_branch"
+    LIST_REMOTES = "git_list_remotes"
+    ADD_REMOTE = "git_add_remote"
+    REMOVE_REMOTE = "git_remove_remote"
 
 def git_status(repo: git.Repo) -> str:
-    return repo.git.status()
+    status_output = repo.git.status()
+    return status_output.decode('utf-8') if isinstance(status_output, bytes) else status_output
 
 def git_diff_unstaged(repo: git.Repo) -> str:
-    return repo.git.diff()
+    diff_output = repo.git.diff()
+    return diff_output.decode('utf-8') if isinstance(diff_output, bytes) else diff_output
 
 def git_diff_staged(repo: git.Repo) -> str:
-    return repo.git.diff("--cached")
+    diff_output = repo.git.diff("--cached")
+    return diff_output.decode('utf-8') if isinstance(diff_output, bytes) else diff_output
 
 def git_diff(repo: git.Repo, target: str) -> str:
-    return repo.git.diff(target)
+    diff_output = repo.git.diff(target)
+    return diff_output.decode('utf-8') if isinstance(diff_output, bytes) else diff_output
 
 def git_commit(repo: git.Repo, message: str) -> str:
     commit = repo.index.commit(message)
@@ -107,12 +180,18 @@ def git_log(repo: git.Repo, max_count: int = 10) -> list[str]:
 
 def git_create_branch(repo: git.Repo, branch_name: str, base_branch: str | None = None) -> str:
     if base_branch:
-        base = repo.refs[base_branch]
+        try:
+            base = repo.heads[base_branch]
+        except (IndexError, AttributeError):
+            raise ValueError(f"Branch '{base_branch}' not found")
     else:
         base = repo.active_branch
 
-    repo.create_head(branch_name, base)
-    return f"Created branch '{branch_name}' from '{base.name}'"
+    # Create the new branch
+    new_branch = repo.create_head(branch_name, base)
+    base_name = base.name.decode('utf-8') if isinstance(base.name, bytes) else base.name
+    branch_name_str = branch_name.decode('utf-8') if isinstance(branch_name, bytes) else branch_name
+    return f"Created branch '{branch_name_str}' from '{base_name}'"
 
 def git_checkout(repo: git.Repo, branch_name: str) -> str:
     repo.git.checkout(branch_name)
@@ -132,9 +211,149 @@ def git_show(repo: git.Repo, revision: str) -> str:
     else:
         diff = commit.diff(git.NULL_TREE, create_patch=True)
     for d in diff:
-        output.append(f"\n--- {d.a_path}\n+++ {d.b_path}\n")
-        output.append(d.diff.decode('utf-8'))
+        a_path = d.a_path.decode('utf-8') if isinstance(d.a_path, bytes) else d.a_path
+        b_path = d.b_path.decode('utf-8') if isinstance(d.b_path, bytes) else d.b_path
+        diff_content = d.diff.decode('utf-8') if isinstance(d.diff, bytes) else d.diff
+        output.append(f"\n--- {a_path}\n+++ {b_path}\n")
+        output.append(diff_content)
     return "".join(output)
+
+def git_push(repo: git.Repo, remote: str = "origin", branch: str | None = None) -> str:
+    remote_obj = repo.remote(remote)
+    
+    # Configure credentials if using HTTPS
+    if remote_obj.url.startswith('https://') and GIT_USERNAME and GIT_TOKEN:
+        with repo.git.custom_environment(GIT_USERNAME=GIT_USERNAME, GIT_PASSWORD=GIT_TOKEN):
+            if branch:
+                remote_obj.push(branch)
+                return f"Pushed changes to {remote}/{branch}"
+            else:
+                remote_obj.push()
+                return f"Pushed changes to {remote}"
+    else:
+        # Using SSH or no credentials provided
+        if branch:
+            remote_obj.push(branch)
+            return f"Pushed changes to {remote}/{branch}"
+        else:
+            remote_obj.push()
+            return f"Pushed changes to {remote}"
+
+def git_pull(repo: git.Repo, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> str:
+    remote_obj = repo.remote(remote)
+    
+    # Configure Git to use rebase or merge strategy
+    with repo.config_writer() as config:
+        if rebase:
+            config.set_value("pull", "rebase", "true")
+        else:
+            config.set_value("pull", "rebase", "false")
+    
+    try:
+        # Configure credentials if using HTTPS
+        if remote_obj.url.startswith('https://') and GIT_USERNAME and GIT_TOKEN:
+            with repo.git.custom_environment(GIT_USERNAME=GIT_USERNAME, GIT_PASSWORD=GIT_TOKEN):
+                if branch:
+                    repo.git.pull(remote, branch)
+                    strategy = "rebased" if rebase else "merged"
+                    return f"Pulled and {strategy} changes from {remote}/{branch}"
+                else:
+                    repo.git.pull()
+                    strategy = "rebased" if rebase else "merged"
+                    return f"Pulled and {strategy} changes from {remote}"
+        else:
+            # Using SSH or no credentials provided
+            if branch:
+                repo.git.pull(remote, branch)
+                strategy = "rebased" if rebase else "merged"
+                return f"Pulled and {strategy} changes from {remote}/{branch}"
+            else:
+                repo.git.pull()
+                strategy = "rebased" if rebase else "merged"
+                return f"Pulled and {strategy} changes from {remote}"
+    except git.GitCommandError as e:
+        if "resolve your current index first" in str(e):
+            raise ValueError("Cannot pull: You have unstaged changes. Please commit or stash them first.")
+        elif "automatic merge failed" in str(e):
+            raise ValueError("Pull failed: Merge conflicts detected. Please resolve conflicts manually.")
+        raise e
+
+def git_fetch(repo: git.Repo, remote: str = "origin") -> str:
+    remote_obj = repo.remote(remote)
+    
+    # Configure credentials if using HTTPS
+    if remote_obj.url.startswith('https://') and GIT_USERNAME and GIT_TOKEN:
+        with repo.git.custom_environment(GIT_USERNAME=GIT_USERNAME, GIT_PASSWORD=GIT_TOKEN):
+            remote_obj.fetch()
+            return f"Fetched changes from {remote}"
+    else:
+        # Using SSH or no credentials provided
+        remote_obj.fetch()
+        return f"Fetched changes from {remote}"
+
+def git_merge(repo: git.Repo, branch: str) -> str:
+    current = repo.active_branch
+    try:
+        # Try to find branch in local heads first
+        try:
+            merge_branch = repo.heads[branch]
+        except (IndexError, AttributeError):
+            # If not found locally, try to find in remote refs
+            try:
+                merge_branch = repo.refs[branch]
+            except (IndexError, AttributeError):
+                raise ValueError(f"Branch '{branch}' not found")
+        
+        # Perform the merge
+        repo.git.merge(merge_branch, '--no-ff')
+        return f"Merged {branch} into {current}"
+    except git.GitCommandError as e:
+        if "automatic merge failed" in str(e):
+            repo.git.merge('--abort')
+            raise ValueError("Merge failed due to conflicts. Merge aborted.")
+        raise e
+
+def git_stash(repo: git.Repo, message: str | None = None) -> str:
+    if message:
+        repo.git.stash('save', message)
+        return f"Stashed changes with message: {message}"
+    else:
+        repo.git.stash()
+        return "Stashed changes"
+
+def git_stash_pop(repo: git.Repo, index: int = 0) -> str:
+    repo.git.stash('pop', f'stash@{{{index}}}')
+    return f"Popped stash at index {index}"
+
+def git_get_current_branch(repo: git.Repo) -> str:
+    return str(repo.active_branch)
+
+def git_list_branches(repo: git.Repo) -> list[str]:
+    return [str(branch) for branch in repo.heads]
+
+def git_delete_branch(repo: git.Repo, branch_name: str, force: bool = False) -> str:
+    if force:
+        repo.git.branch('-D', branch_name)
+    else:
+        repo.git.branch('-d', branch_name)
+    return f"Deleted branch {branch_name}"
+
+def git_list_remotes(repo: git.Repo) -> list[str]:
+    return [f"{remote.name} ({remote.url})" for remote in repo.remotes]
+
+def git_add_remote(repo: git.Repo, name: str, url: str) -> str:
+    repo.create_remote(name, url)
+    return f"Added remote {name} with URL {url}"
+
+def git_remove_remote(repo: git.Repo, name: str) -> str:
+    try:
+        remote = repo.remote(name)
+        # Get the Remote object from the name
+        remote_obj = next(r for r in repo.remotes if r.name == name)
+        repo.delete_remote(remote_obj)
+        return f"Removed remote {name}"
+    except (ValueError, StopIteration):
+        raise ValueError(f"Remote '{name}' not found")
 
 async def serve(repository: Path | None) -> None:
     logger = logging.getLogger(__name__)
@@ -206,6 +425,66 @@ async def serve(repository: Path | None) -> None:
                 name=GitTools.SHOW,
                 description="Shows the contents of a commit",
                 inputSchema=GitShow.schema(),
+            ),
+            Tool(
+                name=GitTools.PUSH,
+                description="Push changes to remote repository",
+                inputSchema=GitPush.schema(),
+            ),
+            Tool(
+                name=GitTools.PULL,
+                description="Pull changes from remote repository",
+                inputSchema=GitPull.schema(),
+            ),
+            Tool(
+                name=GitTools.FETCH,
+                description="Fetch changes from remote without merging",
+                inputSchema=GitFetch.schema(),
+            ),
+            Tool(
+                name=GitTools.MERGE,
+                description="Merge a branch into current branch",
+                inputSchema=GitMerge.schema(),
+            ),
+            Tool(
+                name=GitTools.STASH,
+                description="Stash current changes",
+                inputSchema=GitStash.schema(),
+            ),
+            Tool(
+                name=GitTools.STASH_POP,
+                description="Pop stashed changes",
+                inputSchema=GitStashPop.schema(),
+            ),
+            Tool(
+                name=GitTools.GET_CURRENT_BRANCH,
+                description="Get name of current branch",
+                inputSchema=GitGetCurrentBranch.schema(),
+            ),
+            Tool(
+                name=GitTools.LIST_BRANCHES,
+                description="List all branches",
+                inputSchema=GitListBranches.schema(),
+            ),
+            Tool(
+                name=GitTools.DELETE_BRANCH,
+                description="Delete a branch",
+                inputSchema=GitDeleteBranch.schema(),
+            ),
+            Tool(
+                name=GitTools.LIST_REMOTES,
+                description="List remote repositories",
+                inputSchema=GitListRemotes.schema(),
+            ),
+            Tool(
+                name=GitTools.ADD_REMOTE,
+                description="Add a new remote repository",
+                inputSchema=GitAddRemote.schema(),
+            ),
+            Tool(
+                name=GitTools.REMOVE_REMOTE,
+                description="Remove a remote repository",
+                inputSchema=GitRemoveRemote.schema(),
             )
         ]
 
@@ -325,9 +604,106 @@ async def serve(repository: Path | None) -> None:
                     text=result
                 )]
 
+            case GitTools.PUSH:
+                result = git_push(repo, arguments.get("remote", "origin"), arguments.get("branch"))
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.PULL:
+                result = git_pull(
+                    repo,
+                    arguments.get("remote", "origin"),
+                    arguments.get("branch"),
+                    arguments.get("rebase", False)
+                )
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.FETCH:
+                result = git_fetch(repo, arguments.get("remote", "origin"))
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.MERGE:
+                result = git_merge(repo, arguments["branch"])
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.STASH:
+                result = git_stash(repo, arguments.get("message"))
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.STASH_POP:
+                result = git_stash_pop(repo, arguments.get("index", 0))
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.GET_CURRENT_BRANCH:
+                result = git_get_current_branch(repo)
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.LIST_BRANCHES:
+                branches = git_list_branches(repo)
+                return [TextContent(
+                    type="text",
+                    text="Branches:\n" + "\n".join(branches)
+                )]
+
+            case GitTools.DELETE_BRANCH:
+                result = git_delete_branch(repo, arguments["branch_name"], arguments.get("force", False))
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.LIST_REMOTES:
+                remotes = git_list_remotes(repo)
+                return [TextContent(
+                    type="text",
+                    text="Remotes:\n" + "\n".join(remotes)
+                )]
+
+            case GitTools.ADD_REMOTE:
+                result = git_add_remote(repo, arguments["name"], arguments["url"])
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
+            case GitTools.REMOVE_REMOTE:
+                result = git_remove_remote(repo, arguments["name"])
+                return [TextContent(
+                    type="text",
+                    text=result
+                )]
+
             case _:
                 raise ValueError(f"Unknown tool: {name}")
 
     options = server.create_initialization_options()
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, options, raise_exceptions=True)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Git MCP Server")
+    parser.add_argument("--repository", type=Path, help="Path to Git repository")
+    args = parser.parse_args()
+    
+    import asyncio
+    asyncio.run(serve(args.repository))
